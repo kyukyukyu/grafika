@@ -31,7 +31,7 @@ import android.view.Surface;
  * <p>
  * The EGLContext must only be attached to one thread at a time.  This class is not thread-safe.
  */
-public final class EglCore {
+public class EglCore {
     private static final String TAG = GlUtil.TAG;
 
     /**
@@ -54,6 +54,7 @@ public final class EglCore {
     private EGLContext mEGLContext = EGL14.EGL_NO_CONTEXT;
     private EGLConfig mEGLConfig = null;
     private int mGlVersion = -1;
+    private boolean mIsWeak;
 
 
     /**
@@ -127,12 +128,48 @@ public final class EglCore {
             mEGLContext = context;
             mGlVersion = 2;
         }
+        mIsWeak = false;
 
         // Confirm with query.
         int[] values = new int[1];
         EGL14.eglQueryContext(mEGLDisplay, mEGLContext, EGL14.EGL_CONTEXT_CLIENT_VERSION,
                 values, 0);
         Log.d(TAG, "EGLContext created, client version " + values[0]);
+    }
+
+    public static EglCore ofCurrentState() {
+        EGLDisplay eglDisplay = EGL14.eglGetCurrentDisplay();
+        EGLContext eglContext = EGL14.eglGetCurrentContext();
+        int[] eglConfigAttribList = new int[] { EGL14.EGL_CONFIG_ID, 0, EGL14.EGL_NONE };
+        EGL14.eglQueryContext(eglDisplay, eglContext,
+                EGL14.EGL_CONFIG_ID, eglConfigAttribList, 1);
+        int[] glVersion = new int[1];
+        EGL14.eglQueryContext(eglDisplay, eglContext,
+                EGL14.EGL_CONTEXT_CLIENT_VERSION, glVersion, 0);
+        EGLConfig[] eglConfig = new EGLConfig[1];
+        int[] numConfig = new int[1];
+        EGL14.eglChooseConfig(
+                eglDisplay,
+                eglConfigAttribList, 0,
+                eglConfig, 0, 1,
+                numConfig, 0);
+        if (numConfig[0] != 1) {
+            throw new IllegalStateException(
+                    "cannot find the EGLConfig object with respect to which the context was created");
+        }
+        return new EglCore(eglDisplay, eglContext, eglConfig[0], glVersion[0]);
+    }
+
+    private EglCore(
+            EGLDisplay eglDisplay,
+            EGLContext eglContext,
+            EGLConfig eglConfig,
+            int glVersion) {
+        mEGLDisplay = eglDisplay;
+        mEGLContext = eglContext;
+        mEGLConfig = eglConfig;
+        mGlVersion = glVersion;
+        mIsWeak = true;
     }
 
     /**
@@ -182,6 +219,10 @@ public final class EglCore {
      * On completion, no context will be current.
      */
     public void release() {
+        if (mIsWeak) {
+            throw new UnsupportedOperationException("not allowed on weak EglCore instances");
+        }
+
         if (mEGLDisplay != EGL14.EGL_NO_DISPLAY) {
             // Android is unusual in that it uses a reference-counted EGLDisplay.  So for
             // every eglInitialize() we need an eglTerminate().
@@ -200,7 +241,7 @@ public final class EglCore {
     @Override
     protected void finalize() throws Throwable {
         try {
-            if (mEGLDisplay != EGL14.EGL_NO_DISPLAY) {
+            if (!mIsWeak && mEGLDisplay != EGL14.EGL_NO_DISPLAY) {
                 // We're limited here -- finalizers don't run on the thread that holds
                 // the EGL state, so if a surface or context is still current on another
                 // thread we can't fully release it here.  Exceptions thrown from here

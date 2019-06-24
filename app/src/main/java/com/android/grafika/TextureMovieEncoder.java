@@ -17,7 +17,10 @@
 package com.android.grafika;
 
 import android.graphics.SurfaceTexture;
+import android.opengl.EGL14;
 import android.opengl.EGLContext;
+import android.opengl.EGLDisplay;
+import android.opengl.EGLSurface;
 import android.opengl.GLES20;
 import android.os.Handler;
 import android.os.Looper;
@@ -62,11 +65,8 @@ public class TextureMovieEncoder implements Runnable {
     private static final String TAG = MainActivity.TAG;
     private static final boolean VERBOSE = false;
 
-    private static final int MSG_START_RECORDING = 0;
     private static final int MSG_STOP_RECORDING = 1;
     private static final int MSG_FRAME_AVAILABLE = 2;
-    private static final int MSG_SET_TEXTURE_ID = 3;
-    private static final int MSG_UPDATE_SHARED_CONTEXT = 4;
     private static final int MSG_QUIT = 5;
 
     // ----- accessed exclusively by encoder thread -----
@@ -144,7 +144,7 @@ public class TextureMovieEncoder implements Runnable {
             }
         }
 
-        mHandler.sendMessage(mHandler.obtainMessage(MSG_START_RECORDING, config));
+        handleStartRecording(config);
     }
 
     /**
@@ -176,7 +176,7 @@ public class TextureMovieEncoder implements Runnable {
      * Tells the video recorder to refresh its EGL surface.  (Call from non-encoder thread.)
      */
     public void updateSharedContext(EGLContext sharedContext) {
-        mHandler.sendMessage(mHandler.obtainMessage(MSG_UPDATE_SHARED_CONTEXT, sharedContext));
+        handleUpdateSharedContext(sharedContext);
     }
 
     /**
@@ -212,8 +212,16 @@ public class TextureMovieEncoder implements Runnable {
             return;
         }
 
-        mHandler.sendMessage(mHandler.obtainMessage(MSG_FRAME_AVAILABLE,
-                (int) (timestamp >> 32), (int) timestamp, transform));
+        mHandler.obtainMessage(MSG_FRAME_AVAILABLE).sendToTarget();
+
+        EGLSurface renderDrawEglSurface = EGL14.eglGetCurrentSurface(EGL14.EGL_DRAW);
+        EGLSurface renderReadEglSurface = EGL14.eglGetCurrentSurface(EGL14.EGL_READ);
+        mInputWindowSurface.makeCurrent();
+        mFullScreen.drawFrame(mTextureId, transform);
+        drawBox(mFrameNum++);
+        mInputWindowSurface.setPresentationTime(timestamp);
+        mInputWindowSurface.swapBuffers();
+        mEglCore.makeCurrent(renderDrawEglSurface, renderReadEglSurface);
     }
 
     /**
@@ -228,7 +236,7 @@ public class TextureMovieEncoder implements Runnable {
                 return;
             }
         }
-        mHandler.sendMessage(mHandler.obtainMessage(MSG_SET_TEXTURE_ID, id, 0, null));
+        handleSetTexture(id);
     }
 
     /**
@@ -277,22 +285,11 @@ public class TextureMovieEncoder implements Runnable {
             }
 
             switch (what) {
-                case MSG_START_RECORDING:
-                    encoder.handleStartRecording((EncoderConfig) obj);
-                    break;
                 case MSG_STOP_RECORDING:
                     encoder.handleStopRecording();
                     break;
                 case MSG_FRAME_AVAILABLE:
-                    long timestamp = (((long) inputMessage.arg1) << 32) |
-                            (((long) inputMessage.arg2) & 0xffffffffL);
-                    encoder.handleFrameAvailable((float[]) obj, timestamp);
-                    break;
-                case MSG_SET_TEXTURE_ID:
-                    encoder.handleSetTexture(inputMessage.arg1);
-                    break;
-                case MSG_UPDATE_SHARED_CONTEXT:
-                    encoder.handleUpdateSharedContext((EGLContext) inputMessage.obj);
+                    encoder.handleFrameAvailable((float[]) obj);
                     break;
                 case MSG_QUIT:
                     Looper.myLooper().quit();
@@ -320,17 +317,10 @@ public class TextureMovieEncoder implements Runnable {
      * box (just because we can).
      * <p>
      * @param transform The texture transform, from SurfaceTexture.
-     * @param timestampNanos The frame's timestamp, from SurfaceTexture.
      */
-    private void handleFrameAvailable(float[] transform, long timestampNanos) {
+    private void handleFrameAvailable(float[] transform) {
         if (VERBOSE) Log.d(TAG, "handleFrameAvailable tr=" + transform);
         mVideoEncoder.drainEncoder(false);
-        mFullScreen.drawFrame(mTextureId, transform);
-
-        drawBox(mFrameNum++);
-
-        mInputWindowSurface.setPresentationTime(timestampNanos);
-        mInputWindowSurface.swapBuffers();
     }
 
     /**
@@ -360,15 +350,14 @@ public class TextureMovieEncoder implements Runnable {
     private void handleUpdateSharedContext(EGLContext newSharedContext) {
         Log.d(TAG, "handleUpdatedSharedContext " + newSharedContext);
 
-        // Release the EGLSurface and EGLContext.
+        // Release the EGLSurface.
         mInputWindowSurface.releaseEglSurface();
         mFullScreen.release(false);
-        mEglCore.release();
 
-        // Create a new EGLContext and recreate the window surface.
-        mEglCore = new EglCore(newSharedContext, EglCore.FLAG_RECORDABLE);
+        // Update EGLContext and recreate the window surface.
+        mEglCore = EglCore.ofCurrentState();
         mInputWindowSurface.recreate(mEglCore);
-        mInputWindowSurface.makeCurrent();
+        //mInputWindowSurface.makeCurrent();
 
         // Create new programs and such for the new context.
         mFullScreen = new FullFrameRect(
@@ -382,9 +371,9 @@ public class TextureMovieEncoder implements Runnable {
         } catch (IOException ioe) {
             throw new RuntimeException(ioe);
         }
-        mEglCore = new EglCore(sharedContext, EglCore.FLAG_RECORDABLE);
+        mEglCore = EglCore.ofCurrentState();
         mInputWindowSurface = new WindowSurface(mEglCore, mVideoEncoder.getInputSurface(), true);
-        mInputWindowSurface.makeCurrent();
+        //mInputWindowSurface.makeCurrent();
 
         mFullScreen = new FullFrameRect(
                 new Texture2dProgram(Texture2dProgram.ProgramType.TEXTURE_EXT));
@@ -400,10 +389,7 @@ public class TextureMovieEncoder implements Runnable {
             mFullScreen.release(false);
             mFullScreen = null;
         }
-        if (mEglCore != null) {
-            mEglCore.release();
-            mEglCore = null;
-        }
+        mEglCore = null;
     }
 
     /**
